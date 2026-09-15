@@ -10,6 +10,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -28,9 +29,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
@@ -55,10 +59,19 @@ enum class MotionState { MOVING, STILL }
 
 data class ParkingEvent(val timestamp: Long)
 
+data class AccelerometerReading(
+    val x: Float = 0f,
+    val y: Float = 0f,
+    val z: Float = 0f,
+    val deviation: Float = 0f,
+    val isStill: Boolean = true
+)
+
+// Spread far apart on purpose so each level clearly behaves differently.
 enum class SensitivityLevel(val threshold: Float, val label: String) {
-    LOW(4.0f, "Low"),
-    MEDIUM(2.0f, "Medium"),
-    HIGH(1.0f, "High")
+    LOW(8.0f, "Low"),     // very tolerant — only a strong shake counts as moving
+    MEDIUM(4.0f, "Medium"),
+    HIGH(1.5f, "High")    // strict — even a small wobble counts as moving
 }
 
 // ---------- Routes ----------
@@ -85,24 +98,36 @@ class ParkingViewModel : ViewModel() {
     private val _sensitivity = MutableStateFlow(SensitivityLevel.MEDIUM)
     val sensitivity: StateFlow<SensitivityLevel> = _sensitivity
 
+    // Raw, unfiltered readings for diagnostics — updates every reading,
+    // independent of sensitivity level or the debounce logic below.
+    private val _lastReading = MutableStateFlow(AccelerometerReading())
+    val lastReading: StateFlow<AccelerometerReading> = _lastReading
+
     private var sensorManager: SensorManager? = null
 
-    // Starts false: a park can only be logged after a genuine moving -> still
-    // transition, never on the very first reading the app happens to see.
     private var wasMoving = false
+    private var stillSinceMillis: Long? = null
+    private val PARKING_STILL_DURATION_MS = 1500L
 
-    private val listener = object : SensorEventListener {
+    private val motionListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             val (x, y, z) = event.values
             val deviation = sqrt(x * x + y * y + z * z) - SensorManager.GRAVITY_EARTH
             val isStillNow = abs(deviation) < _sensitivity.value.threshold
 
             _motionState.value = if (isStillNow) MotionState.STILL else MotionState.MOVING
+            _lastReading.value = AccelerometerReading(x, y, z, deviation, isStillNow)
 
-            if (wasMoving && isStillNow) {
-                onParkingDetected()
+            if (isStillNow) {
+                val since = stillSinceMillis ?: System.currentTimeMillis().also { stillSinceMillis = it }
+                if (wasMoving && System.currentTimeMillis() - since >= PARKING_STILL_DURATION_MS) {
+                    onParkingDetected()
+                    wasMoving = false
+                }
+            } else {
+                stillSinceMillis = null
+                wasMoving = true
             }
-            wasMoving = !isStillNow
         }
 
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
@@ -117,12 +142,12 @@ class ParkingViewModel : ViewModel() {
         sensorManager = manager
         val accelerometer = manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         if (accelerometer != null) {
-            manager.registerListener(listener, accelerometer, SensorManager.SENSOR_DELAY_UI)
+            manager.registerListener(motionListener, accelerometer, SensorManager.SENSOR_DELAY_UI)
         }
     }
 
     fun stopListening() {
-        sensorManager?.unregisterListener(listener)
+        sensorManager?.unregisterListener(motionListener)
     }
 
     fun clearHistory() {
@@ -191,38 +216,62 @@ fun MainScreen(
     val motionState by viewModel.motionState.collectAsState()
     val events by viewModel.parkingEvents.collectAsState()
     val sensitivity by viewModel.sensitivity.collectAsState()
+    val reading by viewModel.lastReading.collectAsState()
+
+    var diagnosticsEnabled by remember { mutableStateOf(false) }
 
     DisposableEffect(Unit) {
         viewModel.startListening(context)
         onDispose { viewModel.stopListening() }
     }
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Text(
-            text = if (motionState == MotionState.STILL) "Parked" else "Moving",
-            style = MaterialTheme.typography.headlineMedium
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(text = "Parking events detected: ${events.size}")
-        Spacer(modifier = Modifier.height(24.dp))
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(
+                text = if (motionState == MotionState.STILL) "Parked" else "Moving",
+                style = MaterialTheme.typography.headlineMedium
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(text = "Parking events detected: ${events.size}")
+            Spacer(modifier = Modifier.height(24.dp))
 
-        Text(text = "Sensitivity")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SensitivityLevel.entries.forEach { level ->
-                if (level == sensitivity) {
-                    Button(onClick = { viewModel.setSensitivity(level) }) { Text(level.label) }
-                } else {
-                    OutlinedButton(onClick = { viewModel.setSensitivity(level) }) { Text(level.label) }
+            Text(text = "Sensitivity")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SensitivityLevel.entries.forEach { level ->
+                    if (level == sensitivity) {
+                        Button(onClick = { viewModel.setSensitivity(level) }) { Text(level.label) }
+                    } else {
+                        OutlinedButton(onClick = { viewModel.setSensitivity(level) }) { Text(level.label) }
+                    }
                 }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+            Button(onClick = onViewHistory) { Text("View History") }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedButton(onClick = { diagnosticsEnabled = !diagnosticsEnabled }) {
+                Text(if (diagnosticsEnabled) "Hide Diagnostics" else "Show Diagnostics")
             }
         }
 
-        Spacer(modifier = Modifier.height(24.dp))
-        Button(onClick = onViewHistory) { Text("View History") }
+        if (diagnosticsEnabled) {
+            Text(
+                text = String.format(
+                    Locale.US,
+                    "x=%.2f\ny=%.2f\nz=%.2f\ndeviation=%.2f",
+                    reading.x, reading.y, reading.z, reading.deviation
+                ),
+                color = if (reading.isStill) Color.Black else Color.Red,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(16.dp)
+            )
+        }
     }
 }
 
