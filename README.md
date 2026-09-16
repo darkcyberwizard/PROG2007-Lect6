@@ -76,6 +76,22 @@ Without this line, Android silently auto-denies the runtime permission request w
 
 **Calibration note:** the app estimates distance as `steps × STEP_LENGTH_METERS` (default `0.75f`). This is a rough population-average stride length and will overestimate for shorter strides. To calibrate: walk a known distance, divide by the steps recorded, and update the constant.
 
+## Connecting a Physical Device via USB Debugging
+
+Needed for Feature 2 (step counter has no emulator support) and optional for Feature 3.
+
+1. **Enable Developer Options** on the phone: Settings → About phone → tap "Build number" 7 times until it says "You are now a developer."
+2. **Enable USB debugging**: Settings → System → Developer options → turn on "USB debugging."
+3. **Connect the phone to your computer with a USB cable.**
+4. A prompt appears on the phone: **"Allow USB debugging?"** with an RSA key fingerprint — tap **Allow** (optionally check "Always allow from this computer" to skip this next time).
+5. In Android Studio, the device should now appear in the device dropdown at the top of the toolbar (next to the Run button). If it doesn't show up:
+   - Make sure the USB cable supports data transfer, not just charging.
+   - On the phone's USB notification, set the connection mode to "File Transfer" (MTP) rather than "Charging only."
+   - Run `adb devices` in a terminal — the phone should show up as `device`, not `unauthorized` (if `unauthorized`, check the phone screen for the allow prompt) or `offline` (try reconnecting the cable).
+6. Select the device from the dropdown and click **Run** — the app installs and launches directly on the phone.
+
+If USB isn't convenient, wireless debugging over Wi-Fi works the same way once paired once via USB or a QR code (Settings → Developer options → Wireless debugging) — see the Feature 2 testing note above.
+
 ## 4. Feature 3 — Parking Location on a Map
 
 Builds on everything in Features 1 and 2.
