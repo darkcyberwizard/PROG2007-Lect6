@@ -92,6 +92,8 @@ Needed for Feature 2 (step counter has no emulator support) and optional for Fea
 
 If USB isn't convenient, wireless debugging over Wi-Fi works the same way once paired once via USB or a QR code (Settings → Developer options → Wireless debugging) — see the Feature 2 testing note above.
 
+The exact menu names and steps above can vary by phone manufacturer and Android version (Samsung, Pixel, Xiaomi, etc. each organize Settings a bit differently), so search online for your specific device model if a step doesn't match what you see.
+
 ## 4. Feature 3 — Parking Location on a Map
 
 Builds on everything in Features 1 and 2.
