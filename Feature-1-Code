@@ -8,34 +8,14 @@ import android.hardware.SensorManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
@@ -43,123 +23,158 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.example.lect6sensorslocation.ui.theme.Lect6SensorsLocationTheme
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.Serializable
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.abs
 import kotlin.math.sqrt
-import com.example.lect6sensorslocation.ui.theme.Lect6SensorsLocationTheme
+import androidx.compose.foundation.Image
+import androidx.compose.ui.platform.LocalContext
 
-// ---------- Model ----------
+// ---------- Data / state types ----------
 
 enum class MotionState { MOVING, STILL }
 
 data class ParkingEvent(val timestamp: Long)
 
 data class AccelerometerReading(
-    val x: Float = 0f,
-    val y: Float = 0f,
-    val z: Float = 0f,
-    val deviation: Float = 0f,
-    val isStill: Boolean = true
+    val x: Float,
+    val y: Float,
+    val z: Float,
+    val deviation: Float,
+    val isStill: Boolean
 )
 
-// Spread far apart on purpose so each level clearly behaves differently.
 enum class SensitivityLevel(val threshold: Float, val label: String) {
-    LOW(8.0f, "Low"),     // very tolerant — only a strong shake counts as moving
+    LOW(8.0f, "Low"),
     MEDIUM(4.0f, "Medium"),
-    HIGH(1.5f, "High")    // strict — even a small wobble counts as moving
+    HIGH(1.5f, "High")
 }
 
-// ---------- Routes ----------
+// ---------- Navigation routes ----------
 
-@Serializable
-object Start
-
-@Serializable
-object Main
-
-@Serializable
-object History
+@Serializable object Start
+@Serializable object Main
+@Serializable object History
 
 // ---------- ViewModel ----------
 
 class ParkingViewModel : ViewModel() {
 
-    private val _motionState = MutableStateFlow(MotionState.MOVING)
-    val motionState: StateFlow<MotionState> = _motionState
-
-    private val _parkingEvents = MutableStateFlow<List<ParkingEvent>>(emptyList())
-    val parkingEvents: StateFlow<List<ParkingEvent>> = _parkingEvents
-
-    private val _sensitivity = MutableStateFlow(SensitivityLevel.MEDIUM)
-    val sensitivity: StateFlow<SensitivityLevel> = _sensitivity
-
-    // Raw, unfiltered readings for diagnostics — updates every reading,
-    // independent of sensitivity level or the debounce logic below.
-    private val _lastReading = MutableStateFlow(AccelerometerReading())
-    val lastReading: StateFlow<AccelerometerReading> = _lastReading
-
     private var sensorManager: SensorManager? = null
 
+    private val _motionState = MutableStateFlow(MotionState.STILL)
+    val motionState: StateFlow<MotionState> = _motionState.asStateFlow()
+
+    private val _parkingEvents = MutableStateFlow<List<ParkingEvent>>(emptyList())
+    val parkingEvents: StateFlow<List<ParkingEvent>> = _parkingEvents.asStateFlow()
+
+    private val _sensitivity = MutableStateFlow(SensitivityLevel.MEDIUM)
+    val sensitivity: StateFlow<SensitivityLevel> = _sensitivity.asStateFlow()
+
+    private val _lastReading = MutableStateFlow<AccelerometerReading?>(null)
+    val lastReading: StateFlow<AccelerometerReading?> = _lastReading.asStateFlow()
+
+    private val _pendingParkingConfirmation = MutableStateFlow(false)
+    val pendingParkingConfirmation: StateFlow<Boolean> = _pendingParkingConfirmation.asStateFlow()
+
+    private var pendingParkingTimestamp: Long = 0L
     private var wasMoving = false
     private var stillSinceMillis: Long? = null
     private val PARKING_STILL_DURATION_MS = 1500L
 
     private val motionListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
-            val (x, y, z) = event.values
-            val deviation = sqrt(x * x + y * y + z * z) - SensorManager.GRAVITY_EARTH
-            val isStillNow = abs(deviation) < _sensitivity.value.threshold
+            if (_pendingParkingConfirmation.value) {
+                stillSinceMillis = null
+                wasMoving = false
+                return
+            }
 
-            _motionState.value = if (isStillNow) MotionState.STILL else MotionState.MOVING
+            val x = event.values[0]
+            val y = event.values[1]
+            val z = event.values[2]
+            val magnitude = sqrt(x * x + y * y + z * z)
+            val deviation = magnitude - SensorManager.GRAVITY_EARTH
+            val isStillNow = kotlin.math.abs(deviation) < _sensitivity.value.threshold
+
             _lastReading.value = AccelerometerReading(x, y, z, deviation, isStillNow)
+            _motionState.value = if (isStillNow) MotionState.STILL else MotionState.MOVING
 
             if (isStillNow) {
-                val since = stillSinceMillis ?: System.currentTimeMillis().also { stillSinceMillis = it }
-                if (wasMoving && System.currentTimeMillis() - since >= PARKING_STILL_DURATION_MS) {
-                    onParkingDetected()
-                    wasMoving = false
+                if (wasMoving) {
+                    if (stillSinceMillis == null) stillSinceMillis = System.currentTimeMillis()
+                    val heldLongEnough =
+                        System.currentTimeMillis() - stillSinceMillis!! >= PARKING_STILL_DURATION_MS
+                    if (heldLongEnough) {
+                        pendingParkingTimestamp = System.currentTimeMillis()
+                        _pendingParkingConfirmation.value = true
+                        wasMoving = false
+                        stillSinceMillis = null
+                    }
                 }
             } else {
-                stillSinceMillis = null
                 wasMoving = true
+                stillSinceMillis = null
             }
         }
 
-        override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {}
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
     }
 
-    private fun onParkingDetected() {
-        _parkingEvents.value = _parkingEvents.value + ParkingEvent(System.currentTimeMillis())
+    fun confirmParkingEvent() {
+        _parkingEvents.value = _parkingEvents.value + ParkingEvent(pendingParkingTimestamp)
+        _pendingParkingConfirmation.value = false
     }
 
-    fun startListening(context: Context) {
-        val manager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        sensorManager = manager
-        val accelerometer = manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        if (accelerometer != null) {
-            manager.registerListener(motionListener, accelerometer, SensorManager.SENSOR_DELAY_UI)
-        }
+    fun dismissParkingEvent() {
+        _pendingParkingConfirmation.value = false
     }
 
-    fun stopListening() {
-        sensorManager?.unregisterListener(motionListener)
+    fun setSensitivity(level: SensitivityLevel) {
+        _sensitivity.value = level
     }
 
     fun clearHistory() {
         _parkingEvents.value = emptyList()
     }
 
-    fun setSensitivity(level: SensitivityLevel) {
-        _sensitivity.value = level
+    private fun ensureSensorManager(context: Context): SensorManager {
+        if (sensorManager == null) {
+            sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        }
+        return sensorManager!!
+    }
+
+    fun startListening(context: Context) {
+        val sm = ensureSensorManager(context)
+        val accelerometer = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        sm.registerListener(motionListener, accelerometer, SensorManager.SENSOR_DELAY_UI)
+    }
+
+    fun stopListening() {
+        sensorManager?.unregisterListener(motionListener)
     }
 }
 
-// ---------- App / Navigation ----------
+// ---------- Activity ----------
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            Lect6SensorsLocationTheme {
+                ParkTrackApp()
+            }
+        }
+    }
+}
+
+// ---------- Navigation host ----------
 
 @Composable
 fun ParkTrackApp() {
@@ -168,7 +183,14 @@ fun ParkTrackApp() {
 
     NavHost(navController = navController, startDestination = Start) {
         composable<Start> {
-            StartScreen(onStart = { navController.navigate(Main) })
+            StartScreen(
+                viewModel = viewModel,
+                onStart = {
+                    navController.navigate(Main) {
+                        popUpTo(Start) { inclusive = true }
+                    }
+                }
+            )
         }
         composable<Main> {
             MainScreen(
@@ -185,49 +207,88 @@ fun ParkTrackApp() {
     }
 }
 
-// ---------- Screens ----------
+// ---------- Start screen ----------
 
 @Composable
-fun StartScreen(onStart: () -> Unit) {
+fun StartScreen(viewModel: ParkingViewModel, onStart: () -> Unit) {
+    val sensitivity by viewModel.sensitivity.collectAsState()
+
     Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
         Image(
-            painter = painterResource(id = R.drawable.ic_launcher_foreground),
+            painter = painterResource(R.drawable.ic_launcher_foreground),
             contentDescription = "ParkTrack logo",
-            modifier = Modifier.size(160.dp)
+            modifier = Modifier.size(120.dp)
         )
         Spacer(modifier = Modifier.height(16.dp))
-        Text(text = "ParkTrack", style = MaterialTheme.typography.headlineMedium)
-        Text(text = "Never forget where you parked.")
-        Spacer(modifier = Modifier.height(24.dp))
-        Button(onClick = onStart) { Text("Start Monitoring") }
+        Text("ParkTrack", style = MaterialTheme.typography.headlineMedium)
+        Text(
+            "Automatically detects when you've parked",
+            style = MaterialTheme.typography.bodyMedium
+        )
+
+        Spacer(modifier = Modifier.height(32.dp))
+        Text("Parking-detection sensitivity", style = MaterialTheme.typography.titleMedium)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SensitivityLevel.entries.forEach { level ->
+                Button(
+                    onClick = { viewModel.setSensitivity(level) },
+                    enabled = sensitivity != level
+                ) {
+                    Text(level.label)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(32.dp))
+        Button(onClick = onStart) {
+            Text("Start Monitoring")
+        }
     }
 }
 
+// ---------- Main (monitoring) screen ----------
+
 @Composable
-fun MainScreen(
-    viewModel: ParkingViewModel,
-    onViewHistory: () -> Unit
-) {
+fun MainScreen(viewModel: ParkingViewModel, onViewHistory: () -> Unit) {
     val context = LocalContext.current
     val motionState by viewModel.motionState.collectAsState()
-    val events by viewModel.parkingEvents.collectAsState()
-    val sensitivity by viewModel.sensitivity.collectAsState()
-    val reading by viewModel.lastReading.collectAsState()
-
-    var diagnosticsEnabled by remember { mutableStateOf(false) }
+    val parkingEvents by viewModel.parkingEvents.collectAsState()
+    val lastReading by viewModel.lastReading.collectAsState()
+    val pendingConfirmation by viewModel.pendingParkingConfirmation.collectAsState()
+    var showDiagnostics by remember { mutableStateOf(false) }
 
     DisposableEffect(Unit) {
         viewModel.startListening(context)
         onDispose { viewModel.stopListening() }
     }
 
+    if (pendingConfirmation) {
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissParkingEvent() },
+            title = { Text("Parking detected") },
+            text = { Text("It looks like you've parked. Confirm?") },
+            confirmButton = {
+                Button(onClick = { viewModel.confirmParkingEvent() }) { Text("Yes, parked") }
+            },
+            dismissButton = {
+                Button(onClick = { viewModel.dismissParkingEvent() }) { Text("Not yet") }
+            }
+        )
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
-            modifier = Modifier.fillMaxSize().padding(24.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
@@ -235,83 +296,56 @@ fun MainScreen(
                 text = if (motionState == MotionState.STILL) "Parked" else "Moving",
                 style = MaterialTheme.typography.headlineMedium
             )
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(text = "Parking events detected: ${events.size}")
-            Spacer(modifier = Modifier.height(24.dp))
-
-            Text(text = "Sensitivity")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SensitivityLevel.entries.forEach { level ->
-                    if (level == sensitivity) {
-                        Button(onClick = { viewModel.setSensitivity(level) }) { Text(level.label) }
-                    } else {
-                        OutlinedButton(onClick = { viewModel.setSensitivity(level) }) { Text(level.label) }
-                    }
-                }
-            }
+            Spacer(modifier = Modifier.height(16.dp))
+            Text("Parking events recorded: ${parkingEvents.size}")
 
             Spacer(modifier = Modifier.height(24.dp))
             Button(onClick = onViewHistory) { Text("View History") }
 
-            Spacer(modifier = Modifier.height(8.dp))
-            OutlinedButton(onClick = { diagnosticsEnabled = !diagnosticsEnabled }) {
-                Text(if (diagnosticsEnabled) "Hide Diagnostics" else "Show Diagnostics")
+            Spacer(modifier = Modifier.height(12.dp))
+            Button(onClick = { showDiagnostics = !showDiagnostics }) {
+                Text(if (showDiagnostics) "Hide Diagnostics" else "Show Diagnostics")
             }
         }
 
-        if (diagnosticsEnabled) {
+        if (showDiagnostics && lastReading != null) {
+            val reading = lastReading!!
             Text(
-                text = String.format(
-                    Locale.US,
-                    "x=%.2f\ny=%.2f\nz=%.2f\ndeviation=%.2f",
+                text = "x: %.2f  y: %.2f  z: %.2f\ndeviation: %.2f".format(
                     reading.x, reading.y, reading.z, reading.deviation
                 ),
                 color = if (reading.isStill) Color.Black else Color.Red,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(16.dp)
+                    .padding(12.dp)
             )
         }
     }
 }
 
-@Composable
-fun HistoryScreen(
-    viewModel: ParkingViewModel,
-    onBack: () -> Unit
-) {
-    val events by viewModel.parkingEvents.collectAsState()
-    val formatter = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+// ---------- History screen ----------
 
-    Column(modifier = Modifier.fillMaxSize().padding(24.dp)) {
-        Text(text = "Parking History", style = MaterialTheme.typography.headlineSmall)
+@Composable
+fun HistoryScreen(viewModel: ParkingViewModel, onBack: () -> Unit) {
+    val parkingEvents by viewModel.parkingEvents.collectAsState()
+    val formatter = remember { SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()) }
+
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        Text("Parking History", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(16.dp))
 
         LazyColumn(modifier = Modifier.weight(1f)) {
-            items(events) { event ->
+            items(parkingEvents) { event ->
                 Text(
-                    text = "Parked at ${formatter.format(Date(event.timestamp))}",
+                    text = formatter.format(Date(event.timestamp)),
                     modifier = Modifier.padding(vertical = 8.dp)
                 )
             }
         }
 
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(onClick = onBack) { Text("Back") }
-            OutlinedButton(onClick = { viewModel.clearHistory() }) { Text("Clear History") }
-        }
-    }
-}
-
-// ---------- Activity ----------
-
-class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContent {
-            Lect6SensorsLocationTheme {
-                ParkTrackApp()
-            }
+            Button(onClick = { viewModel.clearHistory() }) { Text("Clear History") }
         }
     }
 }
