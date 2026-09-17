@@ -201,6 +201,7 @@ class ParkingViewModel : ViewModel() {
 
     fun confirmParkingEvent() {
         _parkedLocation.value = null
+        _hasStepResult.value = false
         _parkingEvents.value = _parkingEvents.value + ParkingEvent(pendingParkingTimestamp)
         _pendingParkingConfirmation.value = false
         _showStepOption.value = true
@@ -242,7 +243,7 @@ class ParkingViewModel : ViewModel() {
 
     fun clearStepResult() {
         _stepsAwayFromCar.value = 0
-        _hasStepResult.value = false
+        // hasStepResult intentionally left alone - clearing the number shouldn't hide the panel
     }
 
     fun setSensitivity(level: SensitivityLevel) {
@@ -483,7 +484,7 @@ fun MainScreen(viewModel: ParkingViewModel, onViewHistory: () -> Unit) {
             Spacer(modifier = Modifier.height(16.dp))
             Text("Parking events recorded: ${parkingEvents.size}")
 
-            if (showStepOption && parkedLocation != null) {
+            if ((showStepOption || hasStepResult) && parkedLocation != null) {
                 Spacer(modifier = Modifier.height(16.dp))
                 ParkingMap(location = parkedLocation!!)
             }
